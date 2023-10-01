@@ -1,8 +1,11 @@
 import sys
+import types
 import inspect
 from pathlib import Path
 import runpy
 import builtins
+
+builtin_function_or_method = type(open)
 
 # this is really bad code with many hacks
 # since we must overwrite __import__ and do ugly things with classes
@@ -24,45 +27,50 @@ import builtins
 #   and various attributes of the frames but it's a waste of time since most of the
 #   low hanging solutions are easily gamed (as an example by creating a function
 #   / code object from scatch: type(lambda: 1)(type((lambda: 1).__code__)(...), ...) )
+# TODO when done, check if this comment still applies
 
-def wrap(name: str, target: object):
-    if not inspect.isbuiltin(target) or inspect.ismodule(target) or callable(target):
-        return Wrapped(name, target)
+
+def decorate(name: str, fun):
+    def decorator(*args, **kwargs):
+        nname = f"{name}({', '.join(map(str, args))}, {', '.join(f'{k}={v!r}' for (k,v) in kwargs.items())})"
+        print(nname)
+        return fun(*args, **kwargs)
+
+    return decorator
+
+
+def wrap(name: str, target: object) -> object:
+    if type(target).__module__ != "builtins" or inspect.ismodule(target) or callable(target):
+        if isinstance(target, types.FunctionType) or isinstance(
+            target, builtin_function_or_method
+        ):
+            # if it's a function, decorate it
+            return decorate(name, target)
+        elif isinstance(target, types.MethodType):
+            # if it's a method, decorate the function and rebind it to the instance
+            return types.MethodType(decorate(name, target.__func__), target.__self__)
+        else:
+            # else we can just create a generic class with wrapped attributes
+            # the difference between classes and instances is negligible
+            try:
+                return type(
+                    target.__class__.__name__,  # name of the class
+                    target.__mro__
+                    if hasattr(target, "__mro__")
+                    else target.__class__.__mro__,
+                    {
+                        key: wrap(f"{name}.{key}", value)
+                        for (key, value) in target.__dict__.items()
+                    } if hasattr(target, "__dict__") else {},
+                )
+            except TypeError:
+                print(f"Bailing on {name}")
+                return target
     else:
+        # it's a builtin, it can't be instanciated nor it can be called.
+        # safe to assume it's an instance of an int, bool, str...
         print(f"<- B {name} = {target}")
         return target
-
-class Wrapped():
-    def __init__(self, name: str, target: object, *a, **k):
-        if len(a) != 0 or len(k) != 0:
-            print("=" * 10)
-            print(name, target, a, k)
-            print("=" * 10)
-            breakpoint()
-            exit(1)
-        self.name = name
-        self.target = target
-
-    def __call__(self, *arg, **kwarg):
-        cname = f"{self.name}({', '.join(map(repr, arg))}, {', '.join(f'{a}={b!r}' for (a, b) in kwarg.items())})"
-        print(f"-> {cname}")
-        ret = self.target(*arg, **kwarg)
-        print(f"<- {ret}") 
-        return wrap(cname, ret)
-
-    def __getitem__(self, key: str):
-        real_value = self.target[key]
-        cname = f"{self.name}[{key!r}]"
-        print(f"<- {cname} = {real_value}")
-        return wrap(cname, real_value)
-
-    def __getattr__(self, key: str):
-        if key in self.__dict__:
-            return self.__dict__[key]
-        real_value = getattr(self.target, key)
-        cname = f"{self.name}.{key}"
-        print(f"<- {cname} = {real_value}")
-        return wrap(cname, real_value)
 
 
 def hijack(old_import):
